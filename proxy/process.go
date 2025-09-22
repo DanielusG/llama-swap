@@ -449,6 +449,9 @@ func (p *Process) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := client.Do(req)
 	if err != nil {
+		if isContextCanceled(err) {
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -480,6 +483,9 @@ func (p *Process) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if err != nil {
+			if isContextCanceled(err) {
+				return
+			}
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
@@ -488,6 +494,10 @@ func (p *Process) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	totalTime := time.Since(requestBeginTime)
 	p.proxyLogger.Debugf("<%s> request %s - start: %v, total: %v",
 		p.ID, r.RequestURI, startDuration, totalTime)
+}
+
+func isContextCanceled(err error) bool {
+	return err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 }
 
 // waitForCmd waits for the command to exit and handles exit conditions depending on current state

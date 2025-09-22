@@ -3,8 +3,10 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/mostlygeek/llama-swap/event"
@@ -25,6 +27,8 @@ func addApiHandlers(pm *ProxyManager) {
 		apiGroup.POST("/models/unload", pm.apiUnloadAllModels)
 		apiGroup.GET("/events", pm.apiSendEvents)
 		apiGroup.GET("/metrics", pm.apiGetMetrics)
+		apiGroup.GET("/requests", pm.apiListActiveRequests)
+		apiGroup.DELETE("/requests/:requestId", pm.apiAbortRequest)
 	}
 }
 
@@ -201,4 +205,48 @@ func (pm *ProxyManager) apiGetMetrics(c *gin.Context) {
 		return
 	}
 	c.Data(http.StatusOK, "application/json", jsonData)
+}
+
+// apiListActiveRequests returns a list of all active requests that can be aborted
+func (pm *ProxyManager) apiListActiveRequests(c *gin.Context) {
+	pm.activeRequestsMu.RLock()
+	defer pm.activeRequestsMu.RUnlock()
+
+	requests := make([]*ActiveRequest, 0, len(pm.activeRequests))
+	for _, req := range pm.activeRequests {
+		// Calculate duration
+		duration := time.Since(req.StartTime)
+		reqCopy := *req // Create a copy
+		reqCopy.Status = fmt.Sprintf("active (%v)", duration.Round(time.Second))
+		requests = append(requests, &reqCopy)
+	}
+
+	// Sort by start time (newest first)
+	sort.Slice(requests, func(i, j int) bool {
+		return requests[i].StartTime.After(requests[j].StartTime)
+	})
+
+	c.JSON(http.StatusOK, gin.H{"requests": requests})
+}
+
+// apiAbortRequest aborts a specific request by ID
+func (pm *ProxyManager) apiAbortRequest(c *gin.Context) {
+	requestID := c.Param("requestId")
+
+	pm.activeRequestsMu.Lock()
+	defer pm.activeRequestsMu.Unlock()
+
+	req, exists := pm.activeRequests[requestID]
+	if !exists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "request not found"})
+		return
+	}
+
+	// Call the cancel function
+	req.Cancel()
+
+	// Remove from active requests
+	delete(pm.activeRequests, requestID)
+
+	c.JSON(http.StatusOK, gin.H{"message": "request aborted", "request_id": requestID})
 }

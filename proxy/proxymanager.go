@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/mostlygeek/llama-swap/event"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -39,9 +40,22 @@ type ProxyManager struct {
 
 	processGroups map[string]*ProcessGroup
 
+	// request tracking for abort functionality
+	activeRequests   map[string]*ActiveRequest
+	activeRequestsMu sync.RWMutex
+
 	// shutdown signaling
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
+}
+
+// ActiveRequest represents a tracked request that can be aborted
+type ActiveRequest struct {
+	ID        string             `json:"id"`
+	Model     string             `json:"model"`
+	StartTime time.Time          `json:"start_time"`
+	Status    string             `json:"status"`
+	Cancel    context.CancelFunc `json:"-"`
 }
 
 func New(config Config) *ProxyManager {
@@ -86,6 +100,9 @@ func New(config Config) *ProxyManager {
 
 		processGroups: make(map[string]*ProcessGroup),
 
+		// request tracking for abort functionality
+		activeRequests: make(map[string]*ActiveRequest),
+
 		shutdownCtx:    shutdownCtx,
 		shutdownCancel: shutdownCancel,
 	}
@@ -102,7 +119,6 @@ func New(config Config) *ProxyManager {
 	if len(config.Hooks.OnStartup.Preload) > 0 {
 		// do it in the background, don't block startup -- not sure if good idea yet
 		go func() {
-			discardWriter := &DiscardWriter{}
 			for _, realModelName := range config.Hooks.OnStartup.Preload {
 				proxyLogger.Infof("Preloading model: %s", realModelName)
 				processGroup, _, err := pm.swapProcessGroup(realModelName)
@@ -114,14 +130,29 @@ func New(config Config) *ProxyManager {
 					})
 					proxyLogger.Errorf("Failed to preload model %s: %v", realModelName, err)
 					continue
-				} else {
-					req, _ := http.NewRequest("GET", "/", nil)
-					processGroup.ProxyRequest(realModelName, discardWriter, req)
-					event.Emit(ModelPreloadedEvent{
-						ModelName: realModelName,
-						Success:   true,
-					})
 				}
+
+				process, ok := processGroup.processes[realModelName]
+				if !ok {
+					proxyLogger.Errorf("Process for model %s not found in group %s", realModelName, processGroup.id)
+					continue
+				}
+
+				if process.CurrentState() != StateReady {
+					if err := process.start(); err != nil {
+						proxyLogger.Errorf("Failed to preload model %s: %v", realModelName, err)
+						event.Emit(ModelPreloadedEvent{
+							ModelName: realModelName,
+							Success:   false,
+						})
+						continue
+					}
+				}
+
+				event.Emit(ModelPreloadedEvent{
+					ModelName: realModelName,
+					Success:   true,
+				})
 			}
 		}()
 	}
@@ -435,6 +466,20 @@ func (pm *ProxyManager) proxyToUpstream(c *gin.Context) {
 		return
 	}
 
+	// Generate unique request ID for tracking
+	requestID := uuid.New().String()
+
+	// Create context with cancellation
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	c.Request = c.Request.WithContext(ctx)
+
+	// Track the request
+	pm.trackRequest(requestID, realModelName, cancel)
+	defer func() {
+		pm.untrackRequest(requestID)
+		cancel()
+	}()
+
 	// rewrite the path
 	c.Request.URL.Path = remainingPath
 	processGroup.ProxyRequest(realModelName, c.Writer, c.Request)
@@ -463,6 +508,20 @@ func (pm *ProxyManager) proxyOAIHandler(c *gin.Context) {
 		pm.sendErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("error swapping process group: %s", err.Error()))
 		return
 	}
+
+	// Generate unique request ID for tracking
+	requestID := uuid.New().String()
+
+	// Create context with cancellation
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	c.Request = c.Request.WithContext(ctx)
+
+	// Track the request
+	pm.trackRequest(requestID, realModelName, cancel)
+	defer func() {
+		pm.untrackRequest(requestID)
+		cancel()
+	}()
 
 	// issue #69 allow custom model names to be sent to upstream
 	useModelName := pm.config.Models[realModelName].UseModelName
@@ -606,6 +665,21 @@ func (pm *ProxyManager) proxyOAIPostFormHandler(c *gin.Context) {
 	modifiedReq.ContentLength = int64(requestBuffer.Len())
 
 	// Use the modified request for proxying
+	// Generate unique request ID for tracking
+	requestID := uuid.New().String()
+
+	// Create context with cancellation
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	c.Request = c.Request.WithContext(ctx)
+	modifiedReq = modifiedReq.WithContext(ctx)
+
+	// Track the request
+	pm.trackRequest(requestID, realModelName, cancel)
+	defer func() {
+		pm.untrackRequest(requestID)
+		cancel()
+	}()
+
 	if err := processGroup.ProxyRequest(realModelName, c.Writer, modifiedReq); err != nil {
 		pm.sendErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("error proxying request: %s", err.Error()))
 		pm.proxyLogger.Errorf("Error Proxying Request for processGroup %s and model %s", processGroup.id, realModelName)
@@ -658,4 +732,38 @@ func (pm *ProxyManager) findGroupByModelName(modelName string) *ProcessGroup {
 		}
 	}
 	return nil
+}
+
+// trackRequest adds a request to the active requests map
+func (pm *ProxyManager) trackRequest(requestID, model string, cancel context.CancelFunc) {
+	pm.activeRequestsMu.Lock()
+	defer pm.activeRequestsMu.Unlock()
+
+	pm.activeRequests[requestID] = &ActiveRequest{
+		ID:        requestID,
+		Model:     model,
+		StartTime: time.Now(),
+		Status:    "active",
+		Cancel:    cancel,
+	}
+}
+
+// untrackRequest removes a request from the active requests map
+func (pm *ProxyManager) untrackRequest(requestID string) {
+	pm.activeRequestsMu.Lock()
+	defer pm.activeRequestsMu.Unlock()
+
+	delete(pm.activeRequests, requestID)
+}
+
+// getActiveRequests returns a copy of all active requests
+func (pm *ProxyManager) getActiveRequests() map[string]*ActiveRequest {
+	pm.activeRequestsMu.RLock()
+	defer pm.activeRequestsMu.RUnlock()
+
+	requests := make(map[string]*ActiveRequest)
+	for id, req := range pm.activeRequests {
+		requests[id] = req
+	}
+	return requests
 }

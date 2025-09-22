@@ -22,6 +22,15 @@ interface APIProviderType {
   upstreamLogs: string;
   metrics: Metrics[];
   connectionStatus: ConnectionState;
+  listActiveRequests: () => Promise<ActiveRequest[]>;
+  abortRequest: (requestId: string) => Promise<void>;
+}
+
+interface ActiveRequest {
+  id: string;
+  model: string;
+  start_time: string;
+  status: string;
 }
 
 interface Metrics {
@@ -203,6 +212,34 @@ export function APIProvider({ children, autoStartAPIEvents = true }: APIProvider
     }
   }, []);
 
+  const listActiveRequests = useCallback(async (): Promise<ActiveRequest[]> => {
+    try {
+      const response = await fetch("/api/requests");
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const data = await response.json();
+      return data.requests || [];
+    } catch (error) {
+      console.error("Failed to fetch active requests:", error);
+      return []; // Return empty array as fallback
+    }
+  }, []);
+
+  const abortRequest = useCallback(async (requestId: string) => {
+    try {
+      const response = await fetch(`/api/requests/${requestId}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to abort request: ${response.status}`);
+      }
+    } catch (error) {
+      console.error("Failed to abort request:", error);
+      throw error; // Re-throw to let calling code handle it
+    }
+  }, []);
+
   const value = useMemo(
     () => ({
       models,
@@ -214,8 +251,10 @@ export function APIProvider({ children, autoStartAPIEvents = true }: APIProvider
       upstreamLogs,
       metrics,
       connectionStatus,
+      listActiveRequests,
+      abortRequest,
     }),
-    [models, listModels, unloadAllModels, loadModel, enableAPIEvents, proxyLogs, upstreamLogs, metrics]
+    [models, listModels, unloadAllModels, loadModel, enableAPIEvents, proxyLogs, upstreamLogs, metrics, listActiveRequests, abortRequest]
   );
 
   return <APIContext.Provider value={value}>{children}</APIContext.Provider>;

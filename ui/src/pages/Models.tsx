@@ -1,10 +1,10 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { useAPI } from "../contexts/APIProvider";
 import { LogPanel } from "./LogViewer";
 import { usePersistentState } from "../hooks/usePersistentState";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { useTheme } from "../contexts/ThemeProvider";
-import { RiEyeFill, RiEyeOffFill, RiStopCircleLine, RiSwapBoxFill } from "react-icons/ri";
+import { RiEyeFill, RiEyeOffFill, RiStopCircleLine, RiSwapBoxFill, RiStopFill, RiArrowDownSLine } from "react-icons/ri";
 
 export default function ModelsPage() {
   const { isNarrow } = useTheme();
@@ -37,10 +37,15 @@ export default function ModelsPage() {
 }
 
 function ModelsPanel() {
-  const { models, loadModel, unloadAllModels } = useAPI();
+  const { models, loadModel, unloadAllModels, listActiveRequests, abortRequest } = useAPI();
   const [isUnloading, setIsUnloading] = useState(false);
   const [showUnlisted, setShowUnlisted] = usePersistentState("showUnlisted", true);
   const [showIdorName, setShowIdorName] = usePersistentState<"id" | "name">("showIdorName", "id"); // true = show ID, false = show name
+  const [showStopDropdown, setShowStopDropdown] = useState(false);
+  const [activeRequests, setActiveRequests] = useState<any[]>([]);
+  const [isLoadingRequests, setIsLoadingRequests] = useState(false);
+  const [abortingRequests, setAbortingRequests] = useState<Set<string>>(new Set());
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
   const filteredModels = useMemo(() => {
     return models.filter((model) => showUnlisted || !model.unlisted);
@@ -63,6 +68,75 @@ function ModelsPanel() {
     setShowIdorName((prev) => (prev === "name" ? "id" : "name"));
   }, [showIdorName]);
 
+  const handleStopGenerating = useCallback(async () => {
+    if (showStopDropdown) {
+      setShowStopDropdown(false);
+      return;
+    }
+
+    setIsLoadingRequests(true);
+    try {
+      const requests = await listActiveRequests();
+      setActiveRequests(requests);
+      setShowStopDropdown(true);
+    } catch (e) {
+      console.error("Failed to load active requests:", e);
+    } finally {
+      setIsLoadingRequests(false);
+    }
+  }, [listActiveRequests, showStopDropdown]);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setShowStopDropdown(false);
+      }
+    };
+
+    if (showStopDropdown) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showStopDropdown]);
+
+  const handleAbortRequest = useCallback(async (requestId: string) => {
+    setAbortingRequests(prev => new Set(prev).add(requestId));
+    try {
+      await abortRequest(requestId);
+      // Remove the aborted request from the list
+      setActiveRequests(prev => prev.filter(req => req.id !== requestId));
+    } catch (e) {
+      console.error("Failed to abort request:", e);
+    } finally {
+      setAbortingRequests(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(requestId);
+        return newSet;
+      });
+    }
+  }, [abortRequest]);
+
+  const formatDuration = useCallback((startTime: string) => {
+    const start = new Date(startTime);
+    const now = new Date();
+    const diff = now.getTime() - start.getTime();
+    const seconds = Math.floor(diff / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+
+    if (hours > 0) {
+      return `${hours}h ${minutes % 60}m`;
+    } else if (minutes > 0) {
+      return `${minutes}m ${seconds % 60}s`;
+    } else {
+      return `${seconds}s`;
+    }
+  }, []);
+
   return (
     <div className="card h-full flex flex-col">
       <div className="shrink-0">
@@ -84,6 +158,52 @@ function ModelsPanel() {
             >
               {showUnlisted ? <RiEyeFill size="20" /> : <RiEyeOffFill size="20" />} unlisted
             </button>
+
+            <div className="relative" ref={dropdownRef}>
+              <button
+                className="btn text-base flex items-center gap-2"
+                onClick={handleStopGenerating}
+                disabled={isLoadingRequests}
+              >
+                <RiStopFill size="20" />
+                {isLoadingRequests ? "Loading..." : `Stop Generating${activeRequests.length > 0 ? ` (${activeRequests.length})` : ''}`}
+                <RiArrowDownSLine size="16" className={`transition-transform ${showStopDropdown ? 'rotate-180' : ''}`} />
+              </button>
+
+              {/* Stop Generating Dropdown */}
+              {showStopDropdown && (
+                <div className="absolute top-full left-0 mt-2 bg-background border border-gray-200 dark:border-white/10 rounded-lg shadow-lg z-50 min-w-[300px] max-h-[400px] overflow-y-auto">
+                  <div className="p-4">
+                    <h4 className="font-semibold mb-3">Active Requests</h4>
+
+                    {activeRequests.length === 0 ? (
+                      <p className="text-gray-500 text-center py-4">No active requests found.</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {activeRequests.map((request) => (
+                          <div key={request.id} className="flex items-center justify-between p-3 bg-surface rounded border">
+                            <div className="flex-1 min-w-0">
+                              <div className="font-medium truncate">{request.model}</div>
+                              <div className="text-sm text-gray-500">
+                                ID: {request.id.substring(0, 8)}... | Duration: {formatDuration(request.start_time)}
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => handleAbortRequest(request.id)}
+                              disabled={abortingRequests.has(request.id)}
+                              className="btn btn--sm btn--danger flex items-center gap-2 ml-2 flex-shrink-0"
+                            >
+                              <RiStopCircleLine size="16" />
+                              {abortingRequests.has(request.id) ? "Aborting..." : "Abort"}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
           <button
             className="btn text-base flex items-center gap-2"
@@ -135,6 +255,8 @@ function ModelsPanel() {
           </tbody>
         </table>
       </div>
+
+
     </div>
   );
 }
