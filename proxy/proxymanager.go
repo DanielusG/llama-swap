@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/mostlygeek/llama-swap/event"
+	"github.com/mostlygeek/llama-swap/proxy/config"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -28,7 +29,7 @@ const (
 type ProxyManager struct {
 	sync.Mutex
 
-	config    Config
+	config    config.Config
 	ginEngine *gin.Engine
 
 	// logging
@@ -58,7 +59,7 @@ type ActiveRequest struct {
 	Cancel    context.CancelFunc `json:"-"`
 }
 
-func New(config Config) *ProxyManager {
+func New(config config.Config) *ProxyManager {
 	// set up loggers
 	stdoutLogger := NewLogMonitorWriter(os.Stdout)
 	upstreamLogger := NewLogMonitorWriter(stdoutLogger)
@@ -259,7 +260,6 @@ func (pm *ProxyManager) setupGinEngine() {
 		c.Redirect(http.StatusFound, "/ui/models")
 	})
 	pm.ginEngine.Any("/upstream/*upstreamPath", pm.proxyToUpstream)
-
 	pm.ginEngine.GET("/unload", pm.unloadAllModelsHandler)
 	pm.ginEngine.GET("/running", pm.listRunningProcessesHandler)
 	pm.ginEngine.GET("/health", func(c *gin.Context) {
@@ -401,6 +401,13 @@ func (pm *ProxyManager) listModelsHandler(c *gin.Context) {
 			record["description"] = desc
 		}
 
+		// Add metadata if present
+		if len(modelConfig.Metadata) > 0 {
+			record["meta"] = gin.H{
+				"llamaswap": modelConfig.Metadata,
+			}
+		}
+
 		data = append(data, record)
 	}
 
@@ -451,6 +458,24 @@ func (pm *ProxyManager) proxyToUpstream(c *gin.Context) {
 			modelName = real
 			remainingPath = "/" + strings.Join(parts[i+1:], "/")
 			modelFound = true
+
+			// Check if this is exactly a model name with no additional path
+			// and doesn't end with a trailing slash
+			if remainingPath == "/" && !strings.HasSuffix(upstreamPath, "/") {
+				// Build new URL with query parameters preserved
+				newPath := "/upstream/" + searchModelName + "/"
+				if c.Request.URL.RawQuery != "" {
+					newPath += "?" + c.Request.URL.RawQuery
+				}
+
+				// Use 308 for non-GET/HEAD requests to preserve method
+				if c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead {
+					c.Redirect(http.StatusMovedPermanently, newPath)
+				} else {
+					c.Redirect(http.StatusPermanentRedirect, newPath)
+				}
+				return
+			}
 			break
 		}
 	}
@@ -484,6 +509,7 @@ func (pm *ProxyManager) proxyToUpstream(c *gin.Context) {
 	c.Request.URL.Path = remainingPath
 	processGroup.ProxyRequest(realModelName, c.Writer, c.Request)
 }
+
 func (pm *ProxyManager) proxyOAIHandler(c *gin.Context) {
 	bodyBytes, err := io.ReadAll(c.Request.Body)
 	if err != nil {

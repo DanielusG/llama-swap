@@ -4,7 +4,7 @@ import { LogPanel } from "./LogViewer";
 import { usePersistentState } from "../hooks/usePersistentState";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { useTheme } from "../contexts/ThemeProvider";
-import { RiEyeFill, RiEyeOffFill, RiStopCircleLine, RiSwapBoxFill, RiStopFill, RiArrowDownSLine } from "react-icons/ri";
+import { RiEyeFill, RiEyeOffFill, RiSwapBoxFill, RiStopFill, RiArrowDownSLine, RiEjectLine, RiMenuFill, RiStopCircleLine } from "react-icons/ri";
 
 export default function ModelsPage() {
   const { isNarrow } = useTheme();
@@ -37,7 +37,8 @@ export default function ModelsPage() {
 }
 
 function ModelsPanel() {
-  const { models, loadModel, unloadAllModels, listActiveRequests, abortRequest } = useAPI();
+  const { models, loadModel, unloadAllModels, listActiveRequests, abortRequest, unloadSingleModel } = useAPI();
+  const { isNarrow } = useTheme();
   const [isUnloading, setIsUnloading] = useState(false);
   const [showUnlisted, setShowUnlisted] = usePersistentState("showUnlisted", true);
   const [showIdorName, setShowIdorName] = usePersistentState<"id" | "name">("showIdorName", "id"); // true = show ID, false = show name
@@ -46,6 +47,7 @@ function ModelsPanel() {
   const [isLoadingRequests, setIsLoadingRequests] = useState(false);
   const [abortingRequests, setAbortingRequests] = useState<Set<string>>(new Set());
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const filteredModels = useMemo(() => {
     return models.filter((model) => showUnlisted || !model.unlisted);
@@ -140,24 +142,67 @@ function ModelsPanel() {
   return (
     <div className="card h-full flex flex-col">
       <div className="shrink-0">
-        <h2>Models</h2>
-        <div className="flex justify-between">
-          <div className="flex gap-2">
-            <button
-              className="btn text-base flex items-center gap-2"
-              onClick={toggleIdorName}
-              style={{ lineHeight: "1.2" }}
-            >
-              <RiSwapBoxFill size="20" /> {showIdorName === "id" ? "ID" : "Name"}
-            </button>
+        <div className="flex justify-between items-baseline">
+          <h2 className={isNarrow ? "text-xl" : ""}>Models</h2>
+          {isNarrow && (
+            <div className="relative">
+              <button className="btn text-base flex items-center gap-2 py-1" onClick={() => setMenuOpen(!menuOpen)}>
+                <RiMenuFill size="20" />
+              </button>
+              {menuOpen && (
+                <div className="absolute right-0 mt-2 w-48 bg-surface border border-gray-200 dark:border-white/10 rounded shadow-lg z-20">
+                  <button
+                    className="w-full text-left px-4 py-2 hover:bg-secondary-hover flex items-center gap-2"
+                    onClick={() => {
+                      toggleIdorName();
+                      setMenuOpen(false);
+                    }}
+                  >
+                    <RiSwapBoxFill size="20" /> {showIdorName === "id" ? "Show Name" : "Show ID"}
+                  </button>
+                  <button
+                    className="w-full text-left px-4 py-2 hover:bg-secondary-hover flex items-center gap-2"
+                    onClick={() => {
+                      setShowUnlisted(!showUnlisted);
+                      setMenuOpen(false);
+                    }}
+                  >
+                    {showUnlisted ? <RiEyeOffFill size="20" /> : <RiEyeFill size="20" />}{" "}
+                    {showUnlisted ? "Hide Unlisted" : "Show Unlisted"}
+                  </button>
+                  <button
+                    className="w-full text-left px-4 py-2 hover:bg-secondary-hover flex items-center gap-2"
+                    onClick={() => {
+                      handleUnloadAllModels();
+                      setMenuOpen(false);
+                    }}
+                    disabled={isUnloading}
+                  >
+                    <RiEjectLine size="24" /> {isUnloading ? "Unloading..." : "Unload All"}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        {!isNarrow && (
+          <div className="flex justify-between">
+            <div className="flex gap-2">
+              <button
+                className="btn text-base flex items-center gap-2"
+                onClick={toggleIdorName}
+                style={{ lineHeight: "1.2" }}
+              >
+                <RiSwapBoxFill size="20" /> {showIdorName === "id" ? "ID" : "Name"}
+              </button>
 
-            <button
-              className="btn text-base flex items-center gap-2"
-              onClick={() => setShowUnlisted(!showUnlisted)}
-              style={{ lineHeight: "1.2" }}
-            >
-              {showUnlisted ? <RiEyeFill size="20" /> : <RiEyeOffFill size="20" />} unlisted
-            </button>
+              <button
+                className="btn text-base flex items-center gap-2"
+                onClick={() => setShowUnlisted(!showUnlisted)}
+                style={{ lineHeight: "1.2" }}
+              >
+                {showUnlisted ? <RiEyeFill size="20" /> : <RiEyeOffFill size="20" />} unlisted
+              </button>
 
             <div className="relative" ref={dropdownRef}>
               <button
@@ -204,15 +249,16 @@ function ModelsPanel() {
                 </div>
               )}
             </div>
+            </div>
+            <button
+              className="btn text-base flex items-center gap-2"
+              onClick={handleUnloadAllModels}
+              disabled={isUnloading}
+            >
+              <RiEjectLine size="24" /> {isUnloading ? "Unloading..." : "Unload All"}
+            </button>
           </div>
-          <button
-            className="btn text-base flex items-center gap-2"
-            onClick={handleUnloadAllModels}
-            disabled={isUnloading}
-          >
-            <RiStopCircleLine size="24" /> {isUnloading ? "Unloading..." : "Unload"}
-          </button>
-        </div>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto">
@@ -239,13 +285,19 @@ function ModelsPanel() {
                   )}
                 </td>
                 <td className="w-12">
-                  <button
-                    className="btn btn--sm"
-                    disabled={model.state !== "stopped"}
-                    onClick={() => loadModel(model.id)}
-                  >
-                    Load
-                  </button>
+                  {model.state === "stopped" ? (
+                    <button className="btn btn--sm" onClick={() => loadModel(model.id)}>
+                      Load
+                    </button>
+                  ) : (
+                    <button
+                      className="btn btn--sm"
+                      onClick={() => unloadSingleModel(model.id)}
+                      disabled={model.state !== "ready"}
+                    >
+                      Unload
+                    </button>
+                  )}
                 </td>
                 <td className="w-20">
                   <span className={`w-16 text-center status status--${model.state}`}>{model.state}</span>

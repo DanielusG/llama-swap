@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sort"
 	"time"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/mostlygeek/llama-swap/event"
@@ -25,6 +26,7 @@ func addApiHandlers(pm *ProxyManager) {
 	apiGroup := pm.ginEngine.Group("/api")
 	{
 		apiGroup.POST("/models/unload", pm.apiUnloadAllModels)
+		apiGroup.POST("/models/unload/*model", pm.apiUnloadSingleModelHandler)
 		apiGroup.GET("/events", pm.apiSendEvents)
 		apiGroup.GET("/metrics", pm.apiGetMetrics)
 		apiGroup.GET("/requests", pm.apiListActiveRequests)
@@ -249,4 +251,26 @@ func (pm *ProxyManager) apiAbortRequest(c *gin.Context) {
 	delete(pm.activeRequests, requestID)
 
 	c.JSON(http.StatusOK, gin.H{"message": "request aborted", "request_id": requestID})
+}
+
+func (pm *ProxyManager) apiUnloadSingleModelHandler(c *gin.Context) {
+	requestedModel := strings.TrimPrefix(c.Param("model"), "/")
+	realModelName, found := pm.config.RealModelName(requestedModel)
+	if !found {
+		pm.sendErrorResponse(c, http.StatusNotFound, "Model not found")
+		return
+	}
+
+	processGroup := pm.findGroupByModelName(realModelName)
+	if processGroup == nil {
+		pm.sendErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("process group not found for model %s", requestedModel))
+		return
+	}
+
+	if err := processGroup.StopProcess(realModelName, StopImmediately); err != nil {
+		pm.sendErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("error stopping process: %s", err.Error()))
+		return
+	} else {
+		c.String(http.StatusOK, "OK")
+	}
 }

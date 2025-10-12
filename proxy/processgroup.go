@@ -5,12 +5,14 @@ import (
 	"net/http"
 	"slices"
 	"sync"
+
+	"github.com/mostlygeek/llama-swap/proxy/config"
 )
 
 type ProcessGroup struct {
 	sync.Mutex
 
-	config     Config
+	config     config.Config
 	id         string
 	swap       bool
 	exclusive  bool
@@ -24,7 +26,7 @@ type ProcessGroup struct {
 	lastUsedProcess string
 }
 
-func NewProcessGroup(id string, config Config, proxyLogger *LogMonitor, upstreamLogger *LogMonitor) *ProcessGroup {
+func NewProcessGroup(id string, config config.Config, proxyLogger *LogMonitor, upstreamLogger *LogMonitor) *ProcessGroup {
 	groupConfig, ok := config.Groups[id]
 	if !ok {
 		panic("Unable to find configuration for group id: " + id)
@@ -84,6 +86,29 @@ func (pg *ProcessGroup) ProxyRequest(modelID string, writer http.ResponseWriter,
 
 func (pg *ProcessGroup) HasMember(modelName string) bool {
 	return slices.Contains(pg.config.Groups[pg.id].Members, modelName)
+}
+
+func (pg *ProcessGroup) StopProcess(modelID string, strategy StopStrategy) error {
+	pg.Lock()
+
+	process, exists := pg.processes[modelID]
+	if !exists {
+		pg.Unlock()
+		return fmt.Errorf("process not found for %s", modelID)
+	}
+
+	if pg.lastUsedProcess == modelID {
+		pg.lastUsedProcess = ""
+	}
+	pg.Unlock()
+
+	switch strategy {
+	case StopImmediately:
+		process.StopImmediately()
+	default:
+		process.Stop()
+	}
+	return nil
 }
 
 func (pg *ProcessGroup) StopProcesses(strategy StopStrategy) {

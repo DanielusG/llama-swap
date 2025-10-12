@@ -23,11 +23,17 @@ proxy/ui_dist/placeholder.txt:
 	mkdir -p proxy/ui_dist
 	touch $@
 
-test: proxy/ui_dist/placeholder.txt
-	go test -short -v -count=1 ./proxy
+# use cached test results while developing
+test-dev: proxy/ui_dist/placeholder.txt
+	go test -short ./proxy/...
+	staticcheck ./proxy/... || true
 
+test: proxy/ui_dist/placeholder.txt
+	go test -short -count=1 ./proxy/...
+
+# for CI - full test (takes longer)
 test-all: proxy/ui_dist/placeholder.txt
-	go test -v -count=1 ./proxy
+	go test -count=1 ./proxy/...
 
 ui/node_modules:
 	cd ui && npm install
@@ -81,4 +87,4 @@ release:
 	git tag "$$new_tag";
 
 # Phony targets
-.PHONY: all clean ui mac linux windows simple-responder
+.PHONY: all clean ui mac linux windows simple-responder test test-all test-dev

@@ -16,6 +16,7 @@ interface APIProviderType {
   models: Model[];
   listModels: () => Promise<Model[]>;
   unloadAllModels: () => Promise<void>;
+  unloadSingleModel: (model: string) => Promise<void>;
   loadModel: (model: string) => Promise<void>;
   enableAPIEvents: (enabled: boolean) => void;
   proxyLogs: string;
@@ -186,7 +187,7 @@ export function APIProvider({ children, autoStartAPIEvents = true }: APIProvider
 
   const unloadAllModels = useCallback(async () => {
     try {
-      const response = await fetch(`/api/models/unload/`, {
+      const response = await fetch(`/api/models/unload`, {
         method: "POST",
       });
       if (!response.ok) {
@@ -195,6 +196,20 @@ export function APIProvider({ children, autoStartAPIEvents = true }: APIProvider
     } catch (error) {
       console.error("Failed to unload models:", error);
       throw error; // Re-throw to let calling code handle it
+    }
+  }, []);
+
+  const unloadSingleModel = useCallback(async (model: string) => {
+    try {
+      const response = await fetch(`/api/models/unload/${model}`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to unload model: ${response.status}`);
+      }
+    } catch (error) {
+      console.error("Failed to unload model", model, error);
+      throw error;
     }
   }, []);
 
@@ -245,6 +260,7 @@ export function APIProvider({ children, autoStartAPIEvents = true }: APIProvider
       models,
       listModels,
       unloadAllModels,
+      unloadSingleModel,
       loadModel,
       enableAPIEvents,
       proxyLogs,
